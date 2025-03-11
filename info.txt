@@ -1,6 +1,0 @@
-Channel ID: 2006987817
-Channel Secret: 52b7ad5cb85a6ffed1cd4feff3cfd732
-Channel Access Token: 3ZFU6yWaJealssxZgesIwd8W7e0Yrz6MXyFziZUygaRTUpcOJQHB7+Yh7BBbrnYYiY94JN5sPHTkBnohiKcmG0/blSInHGtH4IamDRbwX+ppoBFP57in1miAnvKSAJ7+m1Bv0xjvMq5nsmowTApZBwdB04t89/1O/w1cDnyilFU=
-
-Activate: .\.venv\Scripts\Activate.ps1
-Deactivate: deactivate 
