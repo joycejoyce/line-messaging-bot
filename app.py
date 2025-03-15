@@ -110,6 +110,8 @@ def handle_text_message(event):
     user_id = event.source.user_id
     dt = datetime.fromtimestamp(event.timestamp / 1000)
 
+    logger.info(f"Received message from user {user_id}: {text}")
+
     # 取得用戶名稱 (必須為好友)
     try:
         profile = line_bot_api.get_profile(user_id)
