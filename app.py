@@ -411,7 +411,39 @@ def upload_video_to_drive(file_stream, filename, day_folder):
     except Exception as e:
         logger.error(f"Error uploading video to Drive: {e}")
         return None
+    
+def init_db():
+    """檢查並建立資料表（若不存在的話）。"""
+    try:
+        conn = psycopg2.connect(
+            host=DB_HOST,
+            port=DB_PORT,
+            dbname=DB_NAME,
+            user=DB_USER,
+            password=DB_PASSWORD
+        )
+        cur = conn.cursor()
+        create_table_sql = """
+            CREATE TABLE IF NOT EXISTS messages (
+                id SERIAL PRIMARY KEY,
+                user_id VARCHAR(255) NOT NULL,
+                display_name VARCHAR(255),
+                message_text TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+        """
+        cur.execute(create_table_sql)
+        conn.commit()
+        logger.info("資料表 'messages' 已初始化（若不存在則已建立）。")
+    except Exception as e:
+        logger.error(f"初始化資料表時發生錯誤: {e}")
+    finally:
+        if 'cur' in locals():
+            cur.close()
+        if 'conn' in locals():
+            conn.close()
 
 if __name__ == "__main__":
+    init_db()
     port = int(PORT)
     app.run(host="0.0.0.0", port=port)
