@@ -1,12 +1,14 @@
 import os
 import io
-import uuid
 import re
 import logging
 from logging.handlers import RotatingFileHandler
 from datetime import datetime
 from flask import Flask, request, abort
 from dotenv import load_dotenv
+import psycopg2
+
+# LINE Bot SDK
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError, LineBotApiError
 from linebot.models import (
@@ -14,74 +16,86 @@ from linebot.models import (
     TemplateSendMessage, ButtonsTemplate, PostbackAction, PostbackEvent, TextSendMessage
 )
 
-# =============== 日誌設定 =============== #
+# Google Drive API imports
+from google.oauth2 import service_account
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaIoBaseUpload
+
+# ===================== Logging Setup =====================
 LOG_FILE = 'app.log'
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)  # 或改成 logging.DEBUG 以看更多細節
+logger.setLevel(logging.INFO)
 
-# 每個檔案最大 10MB，最多保留 5 個舊檔
-handler = RotatingFileHandler(
-    LOG_FILE,
-    maxBytes=10 * 1024 * 1024,
-    backupCount=5,
-    encoding='utf-8'
-)
+rot_handler = RotatingFileHandler(LOG_FILE, maxBytes=10 * 1024 * 1024, backupCount=5, encoding='utf-8')
 formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
-handler.setFormatter(formatter)
-logger.addHandler(handler)
+rot_handler.setFormatter(formatter)
+logger.addHandler(rot_handler)
 
-# 載入專案根目錄下的 .env 檔
+console_handler = logging.StreamHandler()
+console_handler.setFormatter(formatter)
+logger.addHandler(console_handler)
+
+# ===================== Load & Validate Environment Variables =====================
 load_dotenv()
 
-# 從環境變數讀取 LINE 的密鑰資訊
+# LINE credentials
 LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
+# Database credentials
+DB_HOST = os.getenv("DB_HOST")
+DB_PORT = os.getenv("DB_PORT")
+DB_NAME = os.getenv("DB_NAME")
+DB_USER = os.getenv("DB_USER")
+DB_PASSWORD = os.getenv("DB_PASSWORD")
+# Google Drive credentials
+GOOGLE_APPLICATION_CREDENTIALS = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
+GOOGLE_DRIVE_FOLDER_ID = os.getenv("GOOGLE_DRIVE_FOLDER_ID")
+# Application Port
+PORT = os.getenv("PORT")
 
 if not LINE_CHANNEL_SECRET or not LINE_CHANNEL_ACCESS_TOKEN:
-    raise Exception("請確認 .env 中已設定 LINE_CHANNEL_SECRET 與 LINE_CHANNEL_ACCESS_TOKEN")
+    raise Exception("Please set LINE_CHANNEL_SECRET and LINE_CHANNEL_ACCESS_TOKEN in your environment.")
+if not DB_HOST or not DB_PORT or not DB_NAME or not DB_USER or not DB_PASSWORD:
+    raise Exception("Please set DB_HOST, DB_PORT, DB_NAME, DB_USER, and DB_PASSWORD in your environment.")
+if not GOOGLE_APPLICATION_CREDENTIALS or not os.path.exists(GOOGLE_APPLICATION_CREDENTIALS):
+    raise Exception("Please set GOOGLE_APPLICATION_CREDENTIALS to a valid service account JSON file path in your environment.")
+if not GOOGLE_DRIVE_FOLDER_ID:
+    raise Exception("Please set GOOGLE_DRIVE_FOLDER_ID in your environment.")
+if not PORT:
+    raise Exception("Please set PORT in your environment.")
 
-# 初始化 LINE Bot API 與 WebhookHandler
+# ===================== Initialize LINE Bot API =====================
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
-# 定義儲存檔案的基底目錄
+# ===================== Local Backup Setup =====================
 OUTPUT_DIR = "./output"
 if not os.path.exists(OUTPUT_DIR):
     os.makedirs(OUTPUT_DIR)
 
-# 全域字典，記錄每個用戶在同一分鐘內的影像與影片流水號
-image_counters = {}
-video_counters = {}
-
-# 記錄已處理過的影片 messageId，避免重複下載
-processed_video_ids = set()
-
 def sanitize_filename(name):
-    """移除檔名中不合法的字元"""
+    """Remove illegal characters from a filename."""
     return re.sub(r'[^A-Za-z0-9_\-]+', '', name)
 
 def get_daily_folder(dt):
-    """取得當日的資料夾路徑，若不存在則建立"""
+    """Return a local folder for the given day (YYYY-MM-DD); create if not exists."""
     folder = os.path.join(OUTPUT_DIR, dt.strftime("%Y-%m-%d"))
     if not os.path.exists(folder):
         os.makedirs(folder)
     return folder
 
 def append_text_message(dt, display_name, text):
-    """將文字訊息以特定格式附加到當日的 messages.txt 檔案中"""
+    """Append a text message to a local backup file."""
     folder = get_daily_folder(dt)
     file_path = os.path.join(folder, f"{dt.strftime('%Y-%m-%d')}_msg.txt")
     time_str = dt.strftime("%H:%M")
     line_str = f"{time_str} | {display_name} | {text}\n"
-    # 以 append 模式寫檔
     with open(file_path, "a", encoding="utf-8") as f:
         f.write(line_str)
-    logger.info(f"已追加文字訊息至 {file_path}")
+    logger.info(f"Appended text message to {file_path}")
 
 def save_to_local(file_stream, filename, folder):
-    """
-    將 BytesIO 物件存檔到指定資料夾
-    """
+    """Save a BytesIO stream to the specified local folder."""
     if not os.path.exists(folder):
         os.makedirs(folder)
     filepath = os.path.join(folder, filename)
@@ -89,18 +103,153 @@ def save_to_local(file_stream, filename, folder):
         f.write(file_stream.getvalue())
     return filepath
 
-# 建立 Flask Webhook 伺服器
+# ===================== Database Functions =====================
+def insert_text_message_to_db(dt, user_id, display_name, text):
+    """
+    Insert a text message into the 'messages' table.
+    Expected columns: id, user_id, display_name, message_text, created_at.
+    """
+    try:
+        conn = psycopg2.connect(
+            host=DB_HOST, port=DB_PORT, dbname=DB_NAME, user=DB_USER, password=DB_PASSWORD
+        )
+        cur = conn.cursor()
+        insert_sql = """
+            INSERT INTO messages (user_id, display_name, message_text, created_at)
+            VALUES (%s, %s, %s, %s)
+            RETURNING id;
+        """
+        cur.execute(insert_sql, (user_id, display_name, text, dt))
+        new_id = cur.fetchone()[0]
+        conn.commit()
+        logger.info(f"Inserted text message into DB with id: {new_id}")
+    except Exception as e:
+        logger.error(f"Error inserting message into DB: {e}")
+    finally:
+        if 'cur' in locals():
+            cur.close()
+        if 'conn' in locals():
+            conn.close()
+
+# ===================== Google Drive Helper Functions =====================
+def get_or_create_subfolder(drive_service, parent_id, folder_name):
+    """
+    Retrieve or create a subfolder with the given name under the specified parent folder.
+    """
+    query = (
+        "mimeType = 'application/vnd.google-apps.folder' and "
+        f"name = '{folder_name}' and '{parent_id}' in parents and trashed = false"
+    )
+    results = drive_service.files().list(q=query, spaces='drive', fields="files(id, name)").execute()
+    items = results.get('files', [])
+    if items:
+        folder_id = items[0]['id']
+        logger.info(f"Found existing subfolder '{folder_name}' with ID: {folder_id}")
+        return folder_id
+    else:
+        file_metadata = {
+            'name': folder_name,
+            'mimeType': 'application/vnd.google-apps.folder',
+            'parents': [parent_id]
+        }
+        folder = drive_service.files().create(body=file_metadata, fields='id').execute()
+        folder_id = folder.get('id')
+        logger.info(f"Created new subfolder '{folder_name}' with ID: {folder_id}")
+        return folder_id
+
+def upload_image_to_drive(file_stream, filename, day_folder):
+    """
+    Upload an image (from a BytesIO stream) to Google Drive under a daily subfolder.
+    Duplicate checking is done based on the filename (which includes the LINE message ID).
+    """
+    SCOPES = ['https://www.googleapis.com/auth/drive.file']
+    credentials = service_account.Credentials.from_service_account_file(
+        GOOGLE_APPLICATION_CREDENTIALS, scopes=SCOPES
+    )
+    drive_service = build('drive', 'v3', credentials=credentials)
+    
+    # Get (or create) the daily subfolder (e.g., "2025-03-15")
+    subfolder_id = get_or_create_subfolder(drive_service, GOOGLE_DRIVE_FOLDER_ID, day_folder)
+    
+    # Check if the file already exists in this subfolder
+    query = f"name = '{filename}' and '{subfolder_id}' in parents and trashed = false"
+    results = drive_service.files().list(q=query, spaces='drive', fields="files(id)").execute()
+    items = results.get('files', [])
+    if items:
+        logger.info(f"File {filename} already exists in Drive. Skipping upload.")
+        return items[0]['id']
+    
+    file_metadata = {'name': filename, 'parents': [subfolder_id]}
+    file_stream.seek(0)
+    media = MediaIoBaseUpload(file_stream, mimetype='image/jpeg', resumable=True)
+    
+    try:
+        created_file = drive_service.files().create(
+            body=file_metadata, media_body=media, fields='id'
+        ).execute()
+        file_id = created_file.get('id')
+        logger.info(f"Uploaded image to Drive. File ID: {file_id}")
+        return file_id
+    except Exception as e:
+        logger.error(f"Error uploading image to Drive: {e}")
+        return None
+
+def upload_video_to_drive(file_stream, filename, day_folder):
+    """
+    Upload a video (from a BytesIO stream) to Google Drive under a daily subfolder.
+    Duplicate checking is done based on the filename (which includes the LINE message ID).
+    """
+    SCOPES = ['https://www.googleapis.com/auth/drive.file']
+    credentials = service_account.Credentials.from_service_account_file(
+        GOOGLE_APPLICATION_CREDENTIALS, scopes=SCOPES
+    )
+    drive_service = build('drive', 'v3', credentials=credentials)
+    
+    # Get (or create) the daily subfolder (e.g., "2025-03-15")
+    subfolder_id = get_or_create_subfolder(drive_service, GOOGLE_DRIVE_FOLDER_ID, day_folder)
+    
+    # Check if the file already exists in this subfolder
+    query = f"name = '{filename}' and '{subfolder_id}' in parents and trashed = false"
+    results = drive_service.files().list(q=query, spaces='drive', fields="files(id)").execute()
+    items = results.get('files', [])
+    if items:
+        logger.info(f"File {filename} already exists in Drive. Skipping upload.")
+        return items[0]['id']
+    
+    file_metadata = {'name': filename, 'parents': [subfolder_id]}
+    file_stream.seek(0)
+    media = MediaIoBaseUpload(file_stream, mimetype='video/mp4', resumable=True)
+    
+    try:
+        created_file = drive_service.files().create(
+            body=file_metadata, media_body=media, fields='id'
+        ).execute()
+        file_id = created_file.get('id')
+        logger.info(f"Uploaded video to Drive. File ID: {file_id}")
+        return file_id
+    except Exception as e:
+        logger.error(f"Error uploading video to Drive: {e}")
+        return None
+
+# ===================== Global Duplicate Tracking =====================
+# Use global sets to track processed message IDs for images and videos.
+processed_image_ids = set()
+processed_video_ids = set()
+# Global dictionary for video sequencing if needed.
+video_counters = {}
+
+# ===================== Flask App & Webhook Handlers =====================
 app = Flask(__name__)
 
 @app.route("/callback", methods=["POST"])
 def callback():
     signature = request.headers.get("X-Line-Signature")
     body = request.get_data(as_text=True)
-    logger.info(f"收到 LINE 請求，body: {body}")
+    logger.info(f"Received LINE request, body: {body}")
     try:
         handler.handle(body, signature)
     except InvalidSignatureError:
-        logger.error("簽名驗證失敗")
+        logger.error("Signature validation failed")
         abort(400)
     return "OK", 200
 
@@ -109,23 +258,21 @@ def handle_text_message(event):
     text = event.message.text.strip()
     user_id = event.source.user_id
     dt = datetime.fromtimestamp(event.timestamp / 1000)
-
-    logger.info(f"Received message from user {user_id}: {text}")
-
-    # 取得用戶名稱 (必須為好友)
+    logger.info(f"Received text message from user {user_id}: {text}")
+    
     try:
         profile = line_bot_api.get_profile(user_id)
         display_name = profile.display_name
     except LineBotApiError as e:
         display_name = "Unknown"
         logger.error(f"Error fetching profile for user {user_id}: {e}")
-
-    # 處理特定指令
+    
     if text == "建立相簿":
-        reply_text = "請輸入相簿資料，格式：\n建立相簿: YYYY-MM-DD, 相簿名稱\n例如：建立相簿: 2023-03-12, 我的假期"
+        reply_text = ("請輸入相簿資料，格式：\n"
+                      "建立相簿: YYYY-MM-DD, 相簿名稱\n"
+                      "例如：建立相簿: 2023-03-12, 我的假期")
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text))
         return
-
     if text.startswith("建立相簿:"):
         details = text[len("建立相簿:"):].strip()
         if "," in details:
@@ -140,91 +287,82 @@ def handle_text_message(event):
             full_album_name = f"{date_part}_{album_name}"
             reply_text = f"相簿已建立：{full_album_name}"
             line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text))
-            logger.info(f"使用者 {user_id} 建立了相簿: {full_album_name}")
+            logger.info(f"User {user_id} created album: {full_album_name}")
         else:
             line_bot_api.reply_message(event.reply_token, TextSendMessage(text="請使用正確格式，範例：建立相簿: 2023-03-12, 我的假期"))
         return
-
-    # 文字訊息處理：將訊息追加到當日的 messages.txt 檔中
+    
     append_text_message(dt, display_name, text)
+    insert_text_message_to_db(dt, user_id, display_name, text)
 
 @handler.add(MessageEvent, message=ImageMessage)
 def handle_image_message(event):
+    # Check duplicate using message ID
+    if event.message.id in processed_image_ids:
+        logger.info(f"Image messageId={event.message.id} already processed, skipping upload.")
+        return
+    processed_image_ids.add(event.message.id)
+    
     message_content = line_bot_api.get_message_content(event.message.id)
     user_id = event.source.user_id
     dt = datetime.fromtimestamp(event.timestamp / 1000)
-
-    folder = get_daily_folder(dt)
-    date_str = dt.strftime("%Y%m%d")
-    time_str = dt.strftime("%H%M")
-
-    key = (user_id, date_str, time_str)
-    sequence = image_counters.get(key, 0) + 1
-    image_counters[key] = sequence
-
+    
     try:
         profile = line_bot_api.get_profile(user_id)
         display_name = sanitize_filename(profile.display_name)
     except LineBotApiError as e:
         display_name = "Unknown"
         logger.error(f"Error fetching profile for user {user_id}: {e}")
-
-    filename = f"{display_name}_{date_str}_{time_str}_{sequence:02d}.jpg"
+    
+    date_str = dt.strftime("%Y%m%d")
+    time_str = dt.strftime("%H%M")
+    # Filename includes message ID for uniqueness
+    filename = f"{display_name}_{date_str}_{time_str}_{event.message.id}.jpg"
     file_stream = io.BytesIO(message_content.content)
-    saved_path = save_to_local(file_stream, filename, folder)
-    logger.info(f"已儲存圖片訊息： {saved_path}")
+    
+    # Use daily subfolder (e.g., "2025-03-15")
+    day_folder = dt.strftime("%Y-%m-%d")
+    file_id = upload_image_to_drive(file_stream, filename, day_folder)
+    if file_id:
+        logger.info(f"Image uploaded to Drive with File ID: {file_id}")
+    else:
+        logger.error("Failed to upload image to Drive.")
 
 @handler.add(MessageEvent, message=VideoMessage)
 def handle_video_message(event):
+    global video_counters
     user_id = event.source.user_id
     message_id = event.message.id
-
-    # 如果這個 messageId 已經處理過，就跳過
     if message_id in processed_video_ids:
-        logger.info(f"影片 messageId={message_id} 已處理過，略過下載。")
+        logger.info(f"Video messageId={message_id} already processed, skipping upload.")
         return
-
-    # 標記已處理
     processed_video_ids.add(message_id)
-
+    
     message_content = line_bot_api.get_message_content(message_id)
     dt = datetime.fromtimestamp(event.timestamp / 1000)
-
-    folder = get_daily_folder(dt)
     date_str = dt.strftime("%Y%m%d")
     time_str = dt.strftime("%H%M")
-
     key = (user_id, date_str, time_str)
     sequence = video_counters.get(key, 0) + 1
     video_counters[key] = sequence
-
+    
     try:
         profile = line_bot_api.get_profile(user_id)
         display_name = sanitize_filename(profile.display_name)
     except LineBotApiError as e:
         display_name = "Unknown"
         logger.error(f"Error fetching profile for user {user_id}: {e}")
-
-    filename = f"{display_name}_{date_str}_{time_str}_{sequence:02d}.mp4"
+    
+    # Construct filename using message ID for uniqueness
+    filename = f"{display_name}_{date_str}_{time_str}_{event.message.id}.mp4"
     file_stream = io.BytesIO(message_content.content)
-    saved_path = save_to_local(file_stream, filename, folder)
-    logger.info(f"已儲存影片訊息： {saved_path}")
-
-def send_create_album_template(reply_token):
-    template_message = TemplateSendMessage(
-        alt_text="建立相簿",
-        template=ButtonsTemplate(
-            title="建立相簿",
-            text="請點選下方按鈕建立相簿 (預設為今日日期與「我的相簿」)",
-            actions=[
-                PostbackAction(
-                    label="建立相簿",
-                    data=f"action=create_album&album_date={datetime.now().strftime('%Y-%m-%d')}&album_name=我的相簿"
-                )
-            ]
-        )
-    )
-    line_bot_api.reply_message(reply_token, template_message)
+    # Use daily subfolder (same as for images)
+    day_folder = dt.strftime("%Y-%m-%d")
+    file_id = upload_video_to_drive(file_stream, filename, day_folder)
+    if file_id:
+        logger.info(f"Video uploaded to Drive with File ID: {file_id}")
+    else:
+        logger.error("Failed to upload video to Drive.")
 
 @handler.add(PostbackEvent)
 def handle_postback(event):
@@ -234,13 +372,46 @@ def handle_postback(event):
         album_date = params.get("album_date", datetime.now().strftime("%Y-%m-%d"))
         album_name = params.get("album_name", "default")
         full_album_name = f"{album_date}_{album_name}"
-        logger.info(f"使用者 {event.source.user_id} 建立了相簿: {full_album_name}")
-        line_bot_api.reply_message(
-            event.reply_token,
-            TextSendMessage(text=f"相簿已建立：{full_album_name}")
-        )
+        logger.info(f"User {event.source.user_id} created album: {full_album_name}")
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=f"相簿已建立：{full_album_name}"))
+
+def upload_video_to_drive(file_stream, filename, day_folder):
+    """
+    Upload a video (from a BytesIO stream) to Google Drive under a daily subfolder.
+    Duplicate checking is done based on the filename.
+    """
+    SCOPES = ['https://www.googleapis.com/auth/drive.file']
+    credentials = service_account.Credentials.from_service_account_file(
+        GOOGLE_APPLICATION_CREDENTIALS, scopes=SCOPES
+    )
+    drive_service = build('drive', 'v3', credentials=credentials)
+    
+    # Get (or create) the daily subfolder
+    subfolder_id = get_or_create_subfolder(drive_service, GOOGLE_DRIVE_FOLDER_ID, day_folder)
+    
+    # Check for duplicate file in the subfolder
+    query = f"name = '{filename}' and '{subfolder_id}' in parents and trashed = false"
+    results = drive_service.files().list(q=query, spaces='drive', fields="files(id)").execute()
+    items = results.get('files', [])
+    if items:
+        logger.info(f"File {filename} already exists in Drive. Skipping upload.")
+        return items[0]['id']
+    
+    file_metadata = {'name': filename, 'parents': [subfolder_id]}
+    file_stream.seek(0)
+    media = MediaIoBaseUpload(file_stream, mimetype='video/mp4', resumable=True)
+    
+    try:
+        created_file = drive_service.files().create(
+            body=file_metadata, media_body=media, fields='id'
+        ).execute()
+        file_id = created_file.get('id')
+        logger.info(f"Uploaded video to Drive. File ID: {file_id}")
+        return file_id
+    except Exception as e:
+        logger.error(f"Error uploading video to Drive: {e}")
+        return None
 
 if __name__ == "__main__":
-    import os
-    port = int(os.environ.get("PORT", 5000))
+    port = int(PORT)
     app.run(host="0.0.0.0", port=port)

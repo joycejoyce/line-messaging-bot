@@ -1,0 +1,6 @@
+keys/
+.env
+output/
+*.txt
+*.log
+*.jpg
