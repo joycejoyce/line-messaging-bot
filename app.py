@@ -2,6 +2,7 @@ import os
 import io
 import re
 import logging
+import json
 from logging.handlers import RotatingFileHandler
 from datetime import datetime
 from flask import Flask, request, abort
@@ -48,7 +49,6 @@ DB_NAME = os.getenv("PGDATABASE")
 DB_USER = os.getenv("PGUSER")
 DB_PASSWORD = os.getenv("PGPASSWORD")
 # Google Drive credentials
-GOOGLE_APPLICATION_CREDENTIALS = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
 GOOGLE_DRIVE_FOLDER_ID = os.getenv("GOOGLE_DRIVE_FOLDER_ID")
 # Application Port
 PORT = os.getenv("PORT")
@@ -57,8 +57,6 @@ if not LINE_CHANNEL_SECRET or not LINE_CHANNEL_ACCESS_TOKEN:
     raise Exception("Please set LINE_CHANNEL_SECRET and LINE_CHANNEL_ACCESS_TOKEN in your environment.")
 if not DB_HOST or not DB_PORT or not DB_NAME or not DB_USER or not DB_PASSWORD:
     raise Exception("Please set DB_HOST, DB_PORT, DB_NAME, DB_USER, and DB_PASSWORD in your environment.")
-if not GOOGLE_APPLICATION_CREDENTIALS or not os.path.exists(GOOGLE_APPLICATION_CREDENTIALS):
-    raise Exception("Please set GOOGLE_APPLICATION_CREDENTIALS to a valid service account JSON file path in your environment.")
 if not GOOGLE_DRIVE_FOLDER_ID:
     raise Exception("Please set GOOGLE_DRIVE_FOLDER_ID in your environment.")
 if not PORT:
@@ -163,9 +161,7 @@ def upload_image_to_drive(file_stream, filename, day_folder):
     Duplicate checking is done based on the filename (which includes the LINE message ID).
     """
     SCOPES = ['https://www.googleapis.com/auth/drive.file']
-    credentials = service_account.Credentials.from_service_account_file(
-        GOOGLE_APPLICATION_CREDENTIALS, scopes=SCOPES
-    )
+    credentials = get_google_credentials()
     drive_service = build('drive', 'v3', credentials=credentials)
     
     # Get (or create) the daily subfolder (e.g., "2025-03-15")
@@ -200,9 +196,7 @@ def upload_video_to_drive(file_stream, filename, day_folder):
     Duplicate checking is done based on the filename (which includes the LINE message ID).
     """
     SCOPES = ['https://www.googleapis.com/auth/drive.file']
-    credentials = service_account.Credentials.from_service_account_file(
-        GOOGLE_APPLICATION_CREDENTIALS, scopes=SCOPES
-    )
+    credentials = get_google_credentials()
     drive_service = build('drive', 'v3', credentials=credentials)
     
     # Get (or create) the daily subfolder (e.g., "2025-03-15")
@@ -381,9 +375,7 @@ def upload_video_to_drive(file_stream, filename, day_folder):
     Duplicate checking is done based on the filename.
     """
     SCOPES = ['https://www.googleapis.com/auth/drive.file']
-    credentials = service_account.Credentials.from_service_account_file(
-        GOOGLE_APPLICATION_CREDENTIALS, scopes=SCOPES
-    )
+    credentials = get_google_credentials()
     drive_service = build('drive', 'v3', credentials=credentials)
     
     # Get (or create) the daily subfolder
@@ -411,6 +403,16 @@ def upload_video_to_drive(file_stream, filename, day_folder):
     except Exception as e:
         logger.error(f"Error uploading video to Drive: {e}")
         return None
+    
+def get_google_credentials():
+    # Try to read from the environment variable first
+    cred_json = os.getenv("GOOGLE_APPLICATION_CREDENTIALS_JSON")
+    if cred_json:
+        credentials_info = json.loads(cred_json)
+        return service_account.Credentials.from_service_account_info(credentials_info)
+    else:
+        # Fallback to reading from a local file
+        return service_account.Credentials.from_service_account_file("C:\MyProjects\line-messaging-bot\keys\linebot-google-storage-key.json")
     
 def init_db():
     """檢查並建立資料表（若不存在的話）。"""
