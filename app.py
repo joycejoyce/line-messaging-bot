@@ -71,11 +71,10 @@ if not os.path.exists(OUTPUT_DIR):
 
 # Load user mapping from the JSON file
 def load_user_mapping():
-    mapping_file = "user_mapping.json"
-    if not os.path.exists(mapping_file):
-        raise FileNotFoundError(f"Mapping file '{mapping_file}' not found.")
-    with open(mapping_file, "r", encoding="utf-8") as f:
-        return json.load(f)
+    user_mapping_json = os.getenv("USER_MAPPING_JSON")
+    if not user_mapping_json:
+        raise Exception("USER_MAPPING_JSON environment variable is not set.")
+    return json.loads(user_mapping_json)
 
 # Load the mapping at the start of the application
 USER_MAPPING = load_user_mapping()
