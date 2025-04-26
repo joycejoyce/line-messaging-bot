@@ -71,6 +71,21 @@ OUTPUT_DIR = "./output"
 if not os.path.exists(OUTPUT_DIR):
     os.makedirs(OUTPUT_DIR)
 
+# Load user mapping from the JSON file
+def load_user_mapping():
+    mapping_file = "user_mapping.json"
+    if not os.path.exists(mapping_file):
+        raise FileNotFoundError(f"Mapping file '{mapping_file}' not found.")
+    with open(mapping_file, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+# Load the mapping at the start of the application
+USER_MAPPING = load_user_mapping()
+
+def get_display_name(user_id):
+    """Get the display name for a given user_id from the mapping."""
+    return USER_MAPPING.get(user_id, "Unknown")
+    
 def sanitize_filename(name):
     """Remove illegal characters from a filename."""
     return re.sub(r'[^A-Za-z0-9_\-]+', '', name)
@@ -254,12 +269,13 @@ def handle_text_message(event):
     dt = datetime.fromtimestamp(event.timestamp / 1000)
     logger.info(f"Received text message from user {user_id}: {text}")
     
-    try:
-        profile = line_bot_api.get_profile(user_id)
-        display_name = profile.display_name
-    except LineBotApiError as e:
-        display_name = "Unknown"
-        logger.error(f"Error fetching profile for user {user_id}: {e}")
+    # try:
+    #     profile = line_bot_api.get_profile(user_id)
+    #     display_name = profile.display_name
+    # except LineBotApiError as e:
+    #     display_name = "Unknown"
+    #     logger.error(f"Error fetching profile for user {user_id}: {e}")
+    display_name = get_display_name(user_id)
     
     if text == "建立相簿":
         reply_text = ("請輸入相簿資料，格式：\n"
