@@ -10,10 +10,10 @@ from dotenv import load_dotenv
 import psycopg2
 
 # LINE Bot SDK
-from linebot.exceptions import InvalidSignatureError, LineBotApiError
-from linebot.models import MessageEvent, TextMessage, ImageMessage, VideoMessage,PostbackEvent, TextSendMessage
+from linebot.v3.exceptions import InvalidSignatureError, LineBotApiError
 from linebot.v3.messaging import MessagingApi
 from linebot.v3.webhook import WebhookHandler
+from linebot.v3.models import MessageEvent, TextMessage, ImageMessage, VideoMessage, PostbackEvent, TextSendMessage
 
 # Google Drive API imports
 from google.oauth2 import service_account
