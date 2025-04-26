@@ -10,12 +10,10 @@ from dotenv import load_dotenv
 import psycopg2
 
 # LINE Bot SDK
-from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError, LineBotApiError
-from linebot.models import (
-    MessageEvent, TextMessage, ImageMessage, VideoMessage,
-    TemplateSendMessage, ButtonsTemplate, PostbackAction, PostbackEvent, TextSendMessage
-)
+from linebot.models import MessageEvent, TextMessage, ImageMessage, VideoMessage,PostbackEvent, TextSendMessage
+from linebot.v3.messaging import MessagingApi
+from linebot.v3.webhook import WebhookHandler
 
 # Google Drive API imports
 from google.oauth2 import service_account
@@ -63,7 +61,7 @@ if not PORT:
     raise Exception("Please set PORT in your environment.")
 
 # ===================== Initialize LINE Bot API =====================
-line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
+line_bot_api = MessagingApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
 # ===================== Local Backup Setup =====================
@@ -428,7 +426,7 @@ def get_google_credentials():
         return service_account.Credentials.from_service_account_info(credentials_info)
     else:
         # Fallback to reading from a local file
-        return service_account.Credentials.from_service_account_file("C:\MyProjects\line-messaging-bot\keys\linebot-google-storage-key.json")
+        return service_account.Credentials.from_service_account_file("C:/MyProjects/line-messaging-bot/keys/linebot-google-storage-key.json")
     
 def init_db():
     """檢查並建立資料表（若不存在的話）。"""
