@@ -10,10 +10,9 @@ from dotenv import load_dotenv
 import psycopg2
 
 # LINE Bot SDK
-from linebot.v3.exceptions import InvalidSignatureError, LineBotApiError
-from linebot.v3.messaging import MessagingApi
-from linebot.v3.webhook import WebhookHandler
-from linebot.v3.models import MessageEvent, TextMessage, ImageMessage, VideoMessage, PostbackEvent, TextSendMessage
+from linebot import LineBotApi, WebhookHandler
+from linebot.exceptions import InvalidSignatureError, LineBotApiError
+from linebot.models import MessageEvent, TextMessage, ImageMessage, VideoMessage, PostbackEvent, TextSendMessage
 
 # Google Drive API imports
 from google.oauth2 import service_account
@@ -61,7 +60,7 @@ if not PORT:
     raise Exception("Please set PORT in your environment.")
 
 # ===================== Initialize LINE Bot API =====================
-line_bot_api = MessagingApi(LINE_CHANNEL_ACCESS_TOKEN)
+line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
 # ===================== Local Backup Setup =====================
@@ -69,20 +68,6 @@ OUTPUT_DIR = "./output"
 if not os.path.exists(OUTPUT_DIR):
     os.makedirs(OUTPUT_DIR)
 
-# Load user mapping from the JSON file
-def load_user_mapping():
-    user_mapping_json = os.getenv("USER_MAPPING_JSON")
-    if not user_mapping_json:
-        raise Exception("USER_MAPPING_JSON environment variable is not set.")
-    return json.loads(user_mapping_json)
-
-# Load the mapping at the start of the application
-USER_MAPPING = load_user_mapping()
-
-def get_display_name(user_id):
-    """Get the display name for a given user_id from the mapping."""
-    return USER_MAPPING.get(user_id, "Unknown")
-    
 def sanitize_filename(name):
     """Remove illegal characters from a filename."""
     return re.sub(r'[^A-Za-z0-9_\-]+', '', name)
@@ -259,6 +244,20 @@ def callback():
         abort(400)
     return "OK", 200
 
+# Load user mapping from the environment variable
+def load_user_mapping():
+    user_mapping_json = os.getenv("USER_MAPPING_JSON")
+    if not user_mapping_json:
+        raise Exception("USER_MAPPING_JSON environment variable is not set.")
+    return json.loads(user_mapping_json)
+
+# Load the mapping at the start of the application
+USER_MAPPING = load_user_mapping()
+
+def get_display_name(user_id):
+    """Get the display name for a given user_id from the mapping."""
+    return USER_MAPPING.get(user_id, "Unknown")
+
 @handler.add(MessageEvent, message=TextMessage)
 def handle_text_message(event):
     text = event.message.text.strip()
@@ -266,13 +265,8 @@ def handle_text_message(event):
     dt = datetime.fromtimestamp(event.timestamp / 1000)
     logger.info(f"Received text message from user {user_id}: {text}")
     
-    # try:
-    #     profile = line_bot_api.get_profile(user_id)
-    #     display_name = profile.display_name
-    # except LineBotApiError as e:
-    #     display_name = "Unknown"
-    #     logger.error(f"Error fetching profile for user {user_id}: {e}")
     display_name = get_display_name(user_id)
+    logger.info(f"Resolved display name for user {user_id}: {display_name}")
     
     if text == "建立相簿":
         reply_text = ("請輸入相簿資料，格式：\n"
@@ -425,7 +419,7 @@ def get_google_credentials():
         return service_account.Credentials.from_service_account_info(credentials_info)
     else:
         # Fallback to reading from a local file
-        return service_account.Credentials.from_service_account_file("C:/MyProjects/line-messaging-bot/keys/linebot-google-storage-key.json")
+        return service_account.Credentials.from_service_account_file("C:\MyProjects\line-messaging-bot\keys\linebot-google-storage-key.json")
     
 def init_db():
     """檢查並建立資料表（若不存在的話）。"""
